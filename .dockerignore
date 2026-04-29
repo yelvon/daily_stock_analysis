@@ -1,3 +1,15 @@
+# 缩小构建上下文、加快 docker build 上传与解压（不改变镜像语义）
+.git/
+.github/
+.cursor/
+.claude/
+tests/
+apps/dsa-web/node_modules/
+apps/dsa-desktop/
+*.egg-info/
+.pytest_cache/
+htmlcov/
+
 # 忽略 Python 缓存
 __pycache__/
 *.py[cod]

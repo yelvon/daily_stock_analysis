@@ -8,12 +8,15 @@
 #   同时启动: docker-compose -f ./docker/docker-compose.yml up -d analyzer server
 
 name: daily-stock-analysis
-version: '3.8'
 
 x-common: &common
   build:
     context: ..
     dockerfile: docker/Dockerfile
+    # 默认使用阿里云 Debian 镜像，避免 ${VAR:-} 传空串覆盖 Dockerfile 默认值导致仍走 deb.debian.org
+    # 若需官方 Debian CDN：在 .env 中设置 APT_MIRROR_HOST=official
+    args:
+      APT_MIRROR_HOST: ${APT_MIRROR_HOST:-mirrors.aliyun.com}
   restart: unless-stopped
 
   # 环境变量（从 .env 文件加载）
