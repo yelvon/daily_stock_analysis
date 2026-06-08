@@ -140,6 +140,29 @@ class TestExtractStockCode(unittest.TestCase):
     def test_common_word_trend(self):
         self.assertEqual(_extract_stock_code("the TREND is up"), "")
 
+    def test_finance_abbrev_excluded(self):
+        for text in [
+            "TTM",
+            "市盈率 TTM 怎么看",
+            "PE 怎么看",
+            "PE TTM",
+            "WHAT IS PE",
+            "PE IS HIGH",
+            "WHAT IS TTM",
+            "YOY",
+            "QOQ",
+            "EBITDA",
+            "DCF",
+            "CAGR",
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(_extract_stock_code(text), "")
+
+    def test_finance_abbrev_before_real_ticker(self):
+        self.assertEqual(_extract_stock_code("PE AAPL 怎么看"), "AAPL")
+        self.assertEqual(_extract_stock_code("TTM AAPL 怎么看"), "AAPL")
+        self.assertEqual(_extract_stock_code("WHAT IS PE AAPL"), "AAPL")
+
     # --- Priority: A-share > HK > US ---
 
     def test_a_share_takes_priority_over_us(self):
@@ -164,7 +187,11 @@ class TestExtractStockCode(unittest.TestCase):
 
     def test_common_words_set_completeness(self):
         """Ensure critical finance terms are in _COMMON_WORDS."""
-        expected_in_set = {"BUY", "SELL", "HOLD", "ETF", "IPO", "RSI", "MACD", "STOCK", "TREND"}
+        expected_in_set = {
+            "BUY", "SELL", "HOLD", "ETF", "IPO", "RSI", "MACD", "STOCK", "TREND",
+            "TTM", "PE", "YOY", "QOQ", "EBITDA", "DCF", "CAGR",
+            "IS", "WHAT", "HIGH",
+        }
         self.assertTrue(expected_in_set.issubset(_COMMON_WORDS))
 
 
@@ -548,6 +575,7 @@ class TestOrchestratorModes(unittest.TestCase):
     def test_build_context_keeps_market_phase_context_in_meta_not_data(self):
         orch = self._make_orchestrator()
         phase_context = {"phase": "intraday", "is_partial_bar": True}
+        pack_summary = "\n## 分析上下文包摘要\n- 数据块状态：行情 available\n"
 
         ctx = orch._build_context(
             "Analyze 600519",
@@ -555,11 +583,14 @@ class TestOrchestratorModes(unittest.TestCase):
                 "stock_code": "600519",
                 "stock_name": "贵州茅台",
                 "market_phase_context": phase_context,
+                "analysis_context_pack_summary": pack_summary,
             },
         )
 
         self.assertEqual(ctx.meta["market_phase_context"], phase_context)
+        self.assertEqual(ctx.meta["analysis_context_pack_summary"], pack_summary)
         self.assertNotIn("market_phase_context", ctx.data)
+        self.assertNotIn("analysis_context_pack_summary", ctx.data)
 
     def test_build_context_extracts_code_from_query(self):
         orch = self._make_orchestrator()
@@ -1100,6 +1131,17 @@ class TestDecisionAgentChatMode(unittest.TestCase):
         self.assertIsNone(ctx.get_data("final_dashboard"))
         self.assertEqual(opinion.signal, "buy")
 
+    def test_decision_agent_prompt_requires_phase_decision(self):
+        from src.agent.agents.decision_agent import DecisionAgent
+
+        agent = DecisionAgent(tool_registry=MagicMock(), llm_adapter=MagicMock())
+        prompt = agent.system_prompt(AgentContext(query="分析 600519", stock_code="600519"))
+
+        self.assertIn("phase_decision", prompt)
+        self.assertIn("watch_conditions", prompt)
+        self.assertIn("data_limitations", prompt)
+        self.assertIn("confidence_level", prompt)
+
 
 class TestTechnicalAgentSkillPolicy(unittest.TestCase):
     """TechnicalAgent should only receive the legacy trend baseline for implicit/default runs."""
@@ -1177,6 +1219,7 @@ class TestBaseAgentMessageAssembly(unittest.TestCase):
             "is_partial_bar": True,
             "minutes_to_close": 300,
         }
+        ctx.meta["analysis_context_pack_summary"] = "\n## 分析上下文包摘要\n- 数据块状态：行情 available\n"
         ctx.set_data("realtime_quote", {"price": 1880.0})
 
         messages = agent._build_messages(ctx)
@@ -1189,15 +1232,24 @@ class TestBaseAgentMessageAssembly(unittest.TestCase):
             idx for idx, message in enumerate(messages)
             if "[Pre-fetched: realtime_quote]" in message.get("content", "")
         ]
+        pack_indexes = [
+            idx for idx, message in enumerate(messages)
+            if "分析上下文包摘要" in message.get("content", "")
+        ]
         self.assertEqual(len(phase_indexes), 1)
+        self.assertEqual(len(pack_indexes), 1)
         self.assertEqual(len(cached_indexes), 1)
-        self.assertLess(phase_indexes[0], cached_indexes[0])
+        self.assertLess(phase_indexes[0], pack_indexes[0])
+        self.assertLess(pack_indexes[0], cached_indexes[0])
         phase_message = messages[phase_indexes[0]]
         self.assertEqual(phase_message["role"], "user")
         self.assertIn("盘中", phase_message["content"])
         self.assertIn("不得当作完整日线复盘", phase_message["content"])
         self.assertNotIn("market_phase_context", phase_message["content"])
         self.assertNotIn("is_partial_bar", phase_message["content"])
+        pack_message = messages[pack_indexes[0]]
+        self.assertEqual(pack_message["role"], "user")
+        self.assertNotIn("analysis_context_pack_summary", pack_message["content"])
 
 
 # ============================================================
@@ -1614,6 +1666,7 @@ class TestBaseAgentMemoryIntegration(unittest.TestCase):
         agent = self._make_agent(memory)
         ctx = AgentContext(query="test", stock_code="600519")
         ctx.meta["market_phase_context"] = {"phase": "intraday"}
+        ctx.meta["analysis_context_pack_summary"] = "\n## 分析上下文包摘要\n- 数据块状态：行情 available\n"
         ctx.set_data("realtime_quote", {"price": 1880.0})
 
         injected = agent._inject_cached_data(ctx)
@@ -1621,6 +1674,9 @@ class TestBaseAgentMemoryIntegration(unittest.TestCase):
         self.assertIn("[Pre-fetched: realtime_quote]", injected)
         self.assertNotIn("market_phase_context", injected)
         self.assertNotIn("[Pre-fetched: market_phase_context]", injected)
+        self.assertNotIn("analysis_context_pack_summary", injected)
+        self.assertNotIn("[Pre-fetched: analysis_context_pack_summary]", injected)
+        self.assertNotIn("分析上下文包摘要", injected)
 
     def test_memory_calibration_updates_confidence(self):
         memory = MagicMock(enabled=True)
